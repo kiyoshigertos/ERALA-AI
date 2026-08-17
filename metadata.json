@@ -1,0 +1,11 @@
+{
+  "name": "ELARA AI Assistant",
+  "description": "Enhance Learning Analyst and Reasoning Assistant – personal AI for everyday life with schedule management, document scanner, emotional intelligence companion, voice AI, multi-language support (including Filipino), image generation, and deep reasoning.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
