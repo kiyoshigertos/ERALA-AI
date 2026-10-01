@@ -5,6 +5,7 @@ import {
   FileScan,
   Heart,
   Image as ImageIcon,
+  Video as VideoIcon,
   Mic,
   Settings,
   Sparkles,
@@ -82,6 +83,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: ImageIcon,
       color: "text-purple-400 group-hover:text-purple-300",
       description: "Generative art, styles, and prompt refinement",
+    },
+    {
+      id: "videos",
+      label: "Veo 3 Video Studio",
+      sublabel: "Cinematic Text-to-Video",
+      icon: VideoIcon,
+      color: "text-rose-400 group-hover:text-rose-300",
+      description: "Veo 3.1 fast video generation with 16:9 & 9:16 aspect ratios",
     },
     {
       id: "live-voice",

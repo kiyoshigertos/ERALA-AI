@@ -6,6 +6,7 @@ import {
   DocumentScanResult,
   MoodEntry,
   GeneratedImage,
+  GeneratedVideo,
   UserPreferences,
   AttachedImage,
 } from "./types";
@@ -17,6 +18,7 @@ import { ScheduleView } from "./components/ScheduleView";
 import { DocumentScannerView } from "./components/DocumentScannerView";
 import { CompanionView } from "./components/CompanionView";
 import { ImageStudioView } from "./components/ImageStudioView";
+import { VideoStudioView } from "./components/VideoStudioView";
 import { LiveVoiceOrb } from "./components/LiveVoiceOrb";
 import { SettingsModal } from "./components/SettingsModal";
 import { sounds } from "./utils/audio";
@@ -29,6 +31,7 @@ export default function App() {
   const [scannedDocs, setScannedDocs] = useState<DocumentScanResult[]>(storage.getScannedDocs());
   const [moodHistory, setMoodHistory] = useState<MoodEntry[]>(storage.getMoodHistory());
   const [images, setImages] = useState<GeneratedImage[]>(storage.getImages());
+  const [videos, setVideos] = useState<GeneratedVideo[]>(storage.getVideos());
 
   const [isVoiceOrbOpen, setIsVoiceOrbOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -62,6 +65,10 @@ export default function App() {
   useEffect(() => {
     storage.saveImages(images);
   }, [images]);
+
+  useEffect(() => {
+    storage.saveVideos(videos);
+  }, [videos]);
 
   // Handle Send Chat Message
   const handleSendMessage = async (
@@ -181,6 +188,19 @@ export default function App() {
     setImages((prev) => prev.filter((i) => i.id !== id));
   };
 
+  // Video Handlers (Veo 3)
+  const handleSaveVideo = (video: GeneratedVideo) => {
+    setVideos((prev) => [video, ...prev]);
+  };
+
+  const handleUpdateVideo = (updated: GeneratedVideo) => {
+    setVideos((prev) => prev.map((v) => (v.id === updated.id ? updated : v)));
+  };
+
+  const handleDeleteVideo = (id: string) => {
+    setVideos((prev) => prev.filter((v) => v.id !== id));
+  };
+
   // Reset All Data
   const handleResetAllData = () => {
     localStorage.clear();
@@ -189,6 +209,7 @@ export default function App() {
     setScannedDocs([]);
     setMoodHistory([]);
     setImages([]);
+    setVideos([]);
   };
 
   // Viewport framing container based on Device Simulation Selection
@@ -283,6 +304,20 @@ export default function App() {
                 onSendToChat={(img) => {
                   setActiveTab("chat");
                   handleSendMessage(`I-analyze o magbigay ng kwento tungkol sa nalikhang larawang ito: "${img.prompt}"`);
+                }}
+              />
+            )}
+
+            {activeTab === "videos" && (
+              <VideoStudioView
+                videos={videos}
+                savedImages={images}
+                onSaveVideo={handleSaveVideo}
+                onUpdateVideo={handleUpdateVideo}
+                onDeleteVideo={handleDeleteVideo}
+                onSendToChat={(vid) => {
+                  setActiveTab("chat");
+                  handleSendMessage(`I-analyze o magbigay ng kwento tungkol sa nalikhang Veo 3 video na ito: "${vid.prompt}"`);
                 }}
               />
             )}

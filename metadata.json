@@ -1,6 +1,6 @@
 {
   "name": "ELARA AI Assistant",
-  "description": "Enhance Learning Analyst and Reasoning Assistant – personal AI for everyday life with schedule management, document scanner, emotional intelligence companion, voice AI, multi-language support (including Filipino), image generation, and deep reasoning.",
+  "description": "Enhance Learning Analyst and Reasoning Assistant – personal AI for everyday life with schedule management, document scanner, emotional intelligence companion, Gemini 3.8 Live voice AI, Veo 3 video generation, image studio, and deep reasoning.",
   "requestFramePermissions": [
     "camera",
     "microphone"

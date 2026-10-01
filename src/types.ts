@@ -4,6 +4,7 @@ export type ActiveTab =
   | "scanner"
   | "companion"
   | "images"
+  | "videos"
   | "live-voice"
   | "settings";
 
@@ -114,6 +115,20 @@ export interface GeneratedImage {
   imageUrl: string;
   textDescription?: string;
   createdAt: string;
+  isEdited?: boolean;
+  originalImageUrl?: string;
+}
+
+export interface GeneratedVideo {
+  id: string;
+  operationName: string;
+  prompt: string;
+  aspectRatio: "16:9" | "9:16";
+  videoUrl?: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  createdAt: string;
+  sourceImage?: string;
+  error?: string;
 }
 
 export interface UserPreferences {

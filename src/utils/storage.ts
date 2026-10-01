@@ -4,6 +4,7 @@ import {
   DocumentScanResult,
   MoodEntry,
   GeneratedImage,
+  GeneratedVideo,
   UserPreferences,
 } from "../types";
 
@@ -12,6 +13,7 @@ const SCHEDULE_KEY = "elara_schedule_items_v1";
 const SCAN_KEY = "elara_scanned_docs_v1";
 const MOOD_KEY = "elara_mood_history_v1";
 const IMAGES_KEY = "elara_images_v1";
+const VIDEOS_KEY = "elara_videos_v1";
 const PREFS_KEY = "elara_user_prefs_v1";
 
 const DEFAULT_PREFS: UserPreferences = {
@@ -165,6 +167,22 @@ export const storage = {
       localStorage.setItem(IMAGES_KEY, JSON.stringify(images));
     } catch (e) {
       console.warn("Error saving images:", e);
+    }
+  },
+
+  getVideos(): GeneratedVideo[] {
+    try {
+      const data = localStorage.getItem(VIDEOS_KEY);
+      return data ? JSON.parse(data) : [];
+    } catch {
+      return [];
+    }
+  },
+  saveVideos(videos: GeneratedVideo[]) {
+    try {
+      localStorage.setItem(VIDEOS_KEY, JSON.stringify(videos));
+    } catch (e) {
+      console.warn("Error saving videos:", e);
     }
   },
 

@@ -1,7 +1,16 @@
 import express from "express";
+import http from "http";
 import path from "path";
 import dotenv from "dotenv";
-import { GoogleGenAI, Modality, ThinkingLevel, Type } from "@google/genai";
+import { WebSocketServer, WebSocket } from "ws";
+import {
+  GoogleGenAI,
+  GenerateVideosOperation,
+  LiveServerMessage,
+  Modality,
+  ThinkingLevel,
+  Type,
+} from "@google/genai";
 
 dotenv.config();
 
@@ -570,7 +579,342 @@ app.post("/api/generate-image", async (req, res) => {
   }
 });
 
-// 4. Text-to-Speech Endpoint
+// 3b. AI Image Editing Endpoint (with Gemini image-to-image)
+app.post("/api/edit-image", async (req, res) => {
+  try {
+    const {
+      prompt,
+      imageBase64,
+      mimeType = "image/png",
+      aspectRatio = "1:1",
+    } = req.body;
+
+    if (!prompt || !imageBase64) {
+      return res.status(400).json({ error: "Both prompt and base image are required for editing." });
+    }
+
+    const ai = getGeminiClient();
+    const cleanBase64 = imageBase64.replace(/^data:[^;]+;base64,/, "");
+    const resolvedMime = mimeType || "image/png";
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-flash-lite-image",
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: cleanBase64,
+              mimeType: resolvedMime,
+            },
+          },
+          { text: `Modify and edit this image based on this request: ${prompt}` },
+        ],
+      },
+      config: {
+        imageConfig: {
+          aspectRatio: aspectRatio as any,
+        },
+      },
+    });
+
+    let imageUrl = "";
+    let textDescription = "";
+
+    if (response.candidates?.[0]?.content?.parts) {
+      for (const part of response.candidates[0].content.parts) {
+        if (part.inlineData?.data) {
+          const mime = part.inlineData.mimeType || "image/png";
+          imageUrl = `data:${mime};base64,${part.inlineData.data}`;
+        } else if (part.text) {
+          textDescription = part.text;
+        }
+      }
+    }
+
+    if (!imageUrl) {
+      imageUrl = `data:${resolvedMime};base64,${cleanBase64}`;
+    }
+
+    res.json({
+      success: true,
+      imageUrl,
+      textDescription,
+      prompt,
+    });
+  } catch (error: any) {
+    console.error("Error in /api/edit-image:", error);
+    res.status(500).json({
+      error: error.message || "Failed to edit image.",
+    });
+  }
+});
+
+// 3c. Veo 3 Video Generation Endpoints (model: veo-3.1-fast-generate-preview, aspect ratio 16:9 or 9:16)
+app.post("/api/generate-video", async (req, res) => {
+  try {
+    const { prompt, aspectRatio = "16:9", startingImageBase64, mimeType = "image/png" } = req.body;
+    if (!prompt || !prompt.trim()) {
+      return res.status(400).json({ error: "A prompt is required for Veo 3 video generation." });
+    }
+
+    // Aspect ratio must strictly be 16:9 or 9:16
+    const validRatio: "16:9" | "9:16" = aspectRatio === "9:16" ? "9:16" : "16:9";
+    const ai = getGeminiClient();
+
+    const videoPayload: any = {
+      model: "veo-3.1-fast-generate-preview",
+      prompt: prompt.trim(),
+      config: {
+        numberOfVideos: 1,
+        resolution: "720p",
+        aspectRatio: validRatio,
+      },
+    };
+
+    if (startingImageBase64) {
+      const cleanImg = startingImageBase64.replace(/^data:[^;]+;base64,/, "");
+      videoPayload.image = {
+        imageBytes: cleanImg,
+        mimeType: mimeType || "image/png",
+      };
+    }
+
+    console.log(`[Veo 3] Triggering generateVideos with veo-3.1-fast-generate-preview, ratio: ${validRatio}`);
+    const operation = await ai.models.generateVideos(videoPayload);
+
+    console.log(`[Veo 3] Operation started successfully: ${operation.name}`);
+    res.json({
+      success: true,
+      operationName: operation.name,
+      aspectRatio: validRatio,
+      prompt: prompt.trim(),
+    });
+  } catch (error: any) {
+    console.error("Error in /api/generate-video:", error);
+    res.status(500).json({
+      error: error.message || "Failed to start Veo 3 video generation.",
+    });
+  }
+});
+
+app.post("/api/video-status", async (req, res) => {
+  try {
+    const { operationName } = req.body;
+    if (!operationName) {
+      return res.status(400).json({ error: "operationName is required to check status." });
+    }
+
+    const ai = getGeminiClient();
+    const op = new GenerateVideosOperation();
+    op.name = operationName;
+    const updated = await ai.operations.getVideosOperation({ operation: op });
+
+    res.json({
+      done: !!updated.done,
+      error: updated.error || null,
+      operationName,
+    });
+  } catch (error: any) {
+    console.error("Error in /api/video-status:", error);
+    res.status(500).json({
+      error: error.message || "Failed to check video generation status.",
+    });
+  }
+});
+
+app.all(["/api/video-download", "/api/video-stream"], async (req, res) => {
+  try {
+    const operationName = req.body?.operationName || (req.query?.operationName as string);
+    if (!operationName) {
+      return res.status(400).json({ error: "Missing operationName parameter." });
+    }
+
+    const ai = getGeminiClient();
+    const op = new GenerateVideosOperation();
+    op.name = operationName;
+    const updated = await ai.operations.getVideosOperation({ operation: op });
+
+    const uri = updated.response?.generatedVideos?.[0]?.video?.uri;
+    if (!uri) {
+      return res.status(404).json({ error: "Video URI is not yet available or operation did not produce video." });
+    }
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    const videoRes = await fetch(uri, {
+      headers: { "x-goog-api-key": apiKey || "" },
+    });
+
+    if (!videoRes.ok) {
+      return res.status(videoRes.status).json({
+        error: `Could not fetch video from upstream: ${videoRes.statusText}`,
+      });
+    }
+
+    const arrayBuffer = await videoRes.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Accept-Ranges", "bytes");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    if (req.query?.download === "true") {
+      res.setHeader("Content-Disposition", 'attachment; filename="elara-veo3-video.mp4"');
+    }
+
+    res.send(buffer);
+  } catch (error: any) {
+    console.error("Error in /api/video-download:", error);
+    res.status(500).json({
+      error: error.message || "Failed to download video file.",
+    });
+  }
+});
+
+// 4. Dedicated Voice AI Turn Endpoint (Transcribe Audio + Reason + Voice Synthesize)
+app.post("/api/voice-turn", async (req, res) => {
+  try {
+    const {
+      prompt,
+      audioBase64,
+      mimeType = "audio/webm",
+      language = "filipino",
+      persona = "balanced",
+      voiceName = "Kore",
+    } = req.body;
+
+    if (!prompt && !audioBase64) {
+      return res.status(400).json({ error: "Either audioBase64 or prompt text is required." });
+    }
+
+    const ai = getGeminiClient();
+    let userTranscript = prompt || "";
+    let responseText = "";
+    let detectedLanguage = language;
+
+    if (audioBase64) {
+      // Audio Input with Multimodal Processing
+      const cleanBase64 = audioBase64.includes("base64,")
+        ? audioBase64.split("base64,")[1]
+        : audioBase64;
+
+      const voicePrompt = `
+You are ELARA (Enhance Learning Analyst and Reasoning Assistant), an intelligent personal AI assistant.
+Current Time: ${new Date().toLocaleTimeString()}
+User preferred language setting: ${language}.
+Selected Persona: ${persona}.
+
+Please listen to the user's spoken audio carefully and return a JSON object with:
+1. "userTranscript": The exact words spoken by the user in the audio (if in Filipino/Taglish/English, transcribe accurately). If inaudible or empty, output "[Voice input detected]".
+2. "responseText": Your spoken response as ELARA. Keep it natural, conversational, warm, and concise (2 to 4 sentences max, ideal for a voice conversation). If the user asks about schedules or ideas, answer directly and clearly.
+3. "detectedLanguage": The language detected in the audio (e.g., "English", "Filipino", "Taglish").
+
+Return ONLY valid JSON matching this schema.
+`.trim();
+
+      try {
+        const { response } = await callGeminiWithRetryAndFallback(
+          ai,
+          "gemini-3.7-flash",
+          {
+            contents: [
+              {
+                parts: [
+                  {
+                    inlineData: {
+                      data: cleanBase64,
+                      mimeType: mimeType || "audio/webm",
+                    },
+                  },
+                  { text: voicePrompt },
+                ],
+              },
+            ],
+            config: {
+              responseMimeType: "application/json",
+            },
+          },
+          ["gemini-flash-latest"]
+        );
+
+        const parsed = JSON.parse(response.text || "{}");
+        userTranscript = parsed.userTranscript || "[Spoken Query]";
+        responseText = parsed.responseText || "I heard you! How can I assist you with your day?";
+        detectedLanguage = parsed.detectedLanguage || language;
+      } catch (err: any) {
+        console.warn("Direct multimodal audio parsing fallback:", err.message);
+        userTranscript = "Voice Query";
+        responseText = "I'm listening and ready to assist. Could you please repeat that or tell me what you'd like to do?";
+      }
+    } else {
+      // Text Prompt Input
+      const chatPrompt = `
+You are ELARA (Enhance Learning Analyst and Reasoning Assistant), responding in real-time voice mode.
+Language: ${language}. Persona: ${persona}.
+User spoke or asked: "${prompt}"
+
+Provide a voice-friendly, natural, spoken reply. Keep it concise (2 to 4 sentences) without excessive markdown formatting, bullet lists, or code blocks so it sounds great spoken aloud.
+`.trim();
+
+      try {
+        const { response } = await callGeminiWithRetryAndFallback(
+          ai,
+          "gemini-3.7-flash",
+          { contents: chatPrompt },
+          ["gemini-flash-latest"]
+        );
+        responseText = response.text || "I'm here to help you. What's next on your agenda?";
+      } catch (err: any) {
+        responseText = "I understood your request. How would you like me to proceed?";
+      }
+    }
+
+    // Now generate high-fidelity TTS audio for the response
+    let audioOutputBase64 = null;
+    const cleanSpeechText = responseText.slice(0, 500).replace(/[*#_`~\[\]]/g, "");
+
+    const validVoiceNames = ["Kore", "Puck", "Charon", "Fenrir", "Zephyr"];
+    const chosenVoice = validVoiceNames.includes(voiceName) ? voiceName : "Kore";
+
+    try {
+      const ttsResponse = await ai.models.generateContent({
+        model: "gemini-3.1-flash-tts-preview",
+        contents: [{ parts: [{ text: cleanSpeechText }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: chosenVoice,
+              },
+            },
+          },
+        },
+      });
+
+      audioOutputBase64 = ttsResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+    } catch (ttsErr: any) {
+      console.warn("TTS generation notice:", ttsErr.message);
+    }
+
+    res.json({
+      success: true,
+      userTranscript,
+      responseText,
+      audioBase64: audioOutputBase64,
+      mimeType: audioOutputBase64 ? "audio/pcm;rate=24000" : null,
+      voiceUsed: chosenVoice,
+      detectedLanguage,
+      fallbackToWebSpeech: !audioOutputBase64,
+    });
+  } catch (error: any) {
+    console.error("Error in /api/voice-turn:", error);
+    res.status(500).json({
+      error: error.message || "Failed to process voice turn.",
+    });
+  }
+});
+
+// 5. Text-to-Speech Endpoint
 app.post("/api/tts", async (req, res) => {
   try {
     const { text, voiceName = "Kore" } = req.body;
@@ -581,6 +925,9 @@ app.post("/api/tts", async (req, res) => {
     const ai = getGeminiClient();
     const cleanText = text.slice(0, 500).replace(/[*#_`~\[\]]/g, "");
 
+    const validVoiceNames = ["Kore", "Puck", "Charon", "Fenrir", "Zephyr"];
+    const chosenVoice = validVoiceNames.includes(voiceName) ? voiceName : "Kore";
+
     try {
       const response = await ai.models.generateContent({
         model: "gemini-3.1-flash-tts-preview",
@@ -590,7 +937,7 @@ app.post("/api/tts", async (req, res) => {
           speechConfig: {
             voiceConfig: {
               prebuiltVoiceConfig: {
-                voiceName: voiceName || "Kore", // 'Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'
+                voiceName: chosenVoice,
               },
             },
           },
@@ -603,7 +950,7 @@ app.post("/api/tts", async (req, res) => {
           success: true,
           audioBase64: audioData,
           mimeType: "audio/pcm;rate=24000",
-          voiceUsed: voiceName,
+          voiceUsed: chosenVoice,
         });
       }
     } catch (ttsErr: any) {
@@ -722,8 +1069,168 @@ Return ONLY valid JSON array.
   }
 });
 
+// 7. Live API WebSocket Server (gemini-3.8-live)
+function setupLiveWebSocketServer(server: http.Server) {
+  const wss = new WebSocketServer({ server, path: "/live" });
+
+  wss.on("connection", async (clientWs: WebSocket, req) => {
+    console.log("[Live API] Client connected to /live");
+    let session: any = null;
+    let isClosed = false;
+
+    try {
+      const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
+      const voiceName = url.searchParams.get("voice") || "Zephyr";
+      const language = url.searchParams.get("language") || "english";
+      const persona = url.searchParams.get("persona") || "balanced";
+
+      const validVoiceNames = ["Kore", "Puck", "Charon", "Fenrir", "Zephyr"];
+      const chosenVoice = validVoiceNames.includes(voiceName) ? voiceName : "Zephyr";
+
+      const systemInstruction = `
+You are ELARA (Enhance Learning Analyst and Reasoning Assistant), an intelligent, warm, and highly capable personal AI partner.
+You are engaged in a real-time spoken voice conversation with the user.
+Language preference: ${language}.
+Selected Persona: ${persona}.
+IMPORTANT CONVERSATIONAL RULES:
+- Speak in natural, spoken conversational language.
+- Do NOT use markdown symbols, bullet lists, markdown asterisks, or tables.
+- Keep your answers concise (2 to 3 sentences max) so that the user and you can have a natural, fluid dialogue.
+- You have native understanding of English, Filipino/Tagalog, Taglish, Cebuano, and all global languages.
+`.trim();
+
+      const ai = getGeminiClient();
+      session = await ai.live.connect({
+        model: "gemini-3.8-live",
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: chosenVoice,
+              },
+            },
+          },
+          systemInstruction,
+          outputAudioTranscription: {},
+          inputAudioTranscription: {},
+        },
+        callbacks: {
+          onmessage: (message: LiveServerMessage) => {
+            if (isClosed || clientWs.readyState !== WebSocket.OPEN) return;
+            try {
+              // 1. Audio output chunk from Gemini (24kHz 16-bit PCM little-endian)
+              const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+              if (audio) {
+                clientWs.send(JSON.stringify({ type: "audio", audio }));
+              }
+
+              // 2. Interruption event
+              if (message.serverContent?.interrupted) {
+                clientWs.send(JSON.stringify({ type: "interrupted", interrupted: true }));
+              }
+
+              // 3. Audio transcriptions
+              const outputText = (message.serverContent as any)?.outputAudioTranscription?.text;
+              const inputText = (message.serverContent as any)?.inputAudioTranscription?.text;
+              if (outputText || inputText) {
+                clientWs.send(JSON.stringify({
+                  type: "transcription",
+                  outputText,
+                  inputText,
+                }));
+              }
+            } catch (err) {
+              console.error("[Live API] Error sending to clientWs:", err);
+            }
+          },
+          onclose: () => {
+            if (!isClosed && clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: "session_closed" }));
+            }
+          },
+          onerror: (err: any) => {
+            console.error("[Live API] Gemini Live error:", err);
+            if (!isClosed && clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ type: "error", error: err?.message || "Live API error" }));
+            }
+          },
+        },
+      });
+
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({
+          type: "ready",
+          model: "gemini-3.8-live",
+          voice: chosenVoice,
+        }));
+      }
+
+      clientWs.on("message", (raw) => {
+        if (isClosed || !session) return;
+        try {
+          const data = JSON.parse(raw.toString());
+          if (data.audio) {
+            session.sendRealtimeInput({
+              audio: {
+                data: data.audio,
+                mimeType: "audio/pcm;rate=16000",
+              },
+            });
+          } else if (data.text) {
+            session.sendRealtimeInput({
+              text: data.text,
+            });
+          }
+        } catch (err) {
+          console.error("[Live API] Error handling client audio:", err);
+        }
+      });
+
+      clientWs.on("close", () => {
+        isClosed = true;
+        if (session) {
+          try {
+            session.close();
+          } catch (e) {
+            // ignore
+          }
+        }
+      });
+
+      clientWs.on("error", (err) => {
+        console.error("[Live API] Client WebSocket error:", err);
+        isClosed = true;
+        if (session) {
+          try {
+            session.close();
+          } catch (e) {
+            // ignore
+          }
+        }
+      });
+    } catch (err: any) {
+      console.error("[Live API] Failed to initialize live session:", err);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(JSON.stringify({
+          type: "error",
+          error: err?.message || "Failed to start Live API session",
+        }));
+        clientWs.close();
+      }
+    }
+  });
+
+  return wss;
+}
+
 // Vite middleware for development & Static files in production
 async function start() {
+  const server = http.createServer(app);
+
+  // Attach Gemini Live API WebSocket Server
+  setupLiveWebSocketServer(server);
+
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
@@ -739,8 +1246,8 @@ async function start() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`ELARA Assistant server running on http://0.0.0.0:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`ELARA Assistant server with Live API running on http://0.0.0.0:${PORT}`);
   });
 }
 
